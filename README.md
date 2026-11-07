@@ -55,7 +55,7 @@ make env     # writes .env with random secrets and prints the admin login
 make up      # builds and starts everything; services migrate their own schemas
 ```
 
-- API: http://localhost:8080/api/v1 · OpenAPI UI: http://localhost:8080/docs
+- API: http://localhost:8080/api/v1 · OpenAPI UI: http://localhost:8080/docs (set `GATEWAY_PORT` in `.env` if 8080 is taken)
 - `make dev` publishes Postgres, Redis and Kafka on 127.0.0.1 and adds Kafka UI on :8090.
 - `make observability` adds Prometheus (127.0.0.1:9091) and Grafana (127.0.0.1:3001) with an alert rule set and a provisioned dashboard.
 

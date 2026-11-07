@@ -24,4 +24,4 @@ test-race:      ## requires cgo (runs natively on Linux/macOS/CI)
 lint:
 	go vet ./... && gofmt -l pkg services
 e2e:            ## end-to-end tests against the running stack (reads admin login from .env)
-	set -a; . ./.env; set +a; VENDORA_ADMIN_EMAIL="$$ADMIN_EMAIL" VENDORA_ADMIN_PASSWORD="$$ADMIN_PASSWORD" go test -tags e2e -count=1 -v ./tests/e2e
+	set -a; . ./.env; set +a; VENDORA_BASE_URL="http://localhost:$${GATEWAY_PORT:-8080}" VENDORA_ADMIN_EMAIL="$$ADMIN_EMAIL" VENDORA_ADMIN_PASSWORD="$$ADMIN_PASSWORD" go test -tags e2e -count=1 -v ./tests/e2e
