@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package vendora.cart.v1;
+
+// CartService stores quantities only; prices are always read from
+// ProductService so they are authoritative.
+service CartService {
+  rpc GetCart(GetCartRequest) returns (GetCartResponse);
+  rpc AddItem(AddItemRequest) returns (AddItemResponse);
+  rpc SetItemQuantity(SetItemQuantityRequest) returns (SetItemQuantityResponse);
+  rpc RemoveItem(RemoveItemRequest) returns (RemoveItemResponse);
+  rpc ClearCart(ClearCartRequest) returns (ClearCartResponse);
+}
+
+message CartItem {
+  string product_id = 1;
+  string name = 2;
+  int64 unit_price_cents = 3;
+  int32 quantity = 4;
+  int64 line_total_cents = 5;
+  string image_url = 6;
+  // False when the product was deactivated after being added.
+  bool available = 7;
+}
+
+message Cart {
+  string user_id = 1;
+  repeated CartItem items = 2;
+  // Sum of line totals of available items.
+  int64 total_cents = 3;
+  string currency = 4;
+}
+
+message GetCartRequest {
+  string user_id = 1;
+}
+
+message GetCartResponse {
+  Cart cart = 1;
+}
+
+message AddItemRequest {
+  string user_id = 1;
+  string product_id = 2;
+  int32 quantity = 3;
+}
+
+message AddItemResponse {
+  Cart cart = 1;
+}
+
+message SetItemQuantityRequest {
+  string user_id = 1;
+  string product_id = 2;
+  int32 quantity = 3;
+}
+
+message SetItemQuantityResponse {
+  Cart cart = 1;
+}
+
+message RemoveItemRequest {
+  string user_id = 1;
+  string product_id = 2;
+}
+
+message RemoveItemResponse {
+  Cart cart = 1;
+}
+
+message ClearCartRequest {
+  string user_id = 1;
+}
+
+message ClearCartResponse {}

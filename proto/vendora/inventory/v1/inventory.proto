@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package vendora.inventory.v1;
+
+// InventoryService is the single owner of stock levels and reservations.
+service InventoryService {
+  rpc GetStock(GetStockRequest) returns (GetStockResponse);
+  // SetStock sets the absolute available quantity (admin).
+  rpc SetStock(SetStockRequest) returns (SetStockResponse);
+  // AdjustStock adds a (possibly negative) delta to available (admin).
+  rpc AdjustStock(AdjustStockRequest) returns (AdjustStockResponse);
+  // ReserveStock atomically reserves all lines for an order or none.
+  // Idempotent per order_id.
+  rpc ReserveStock(ReserveStockRequest) returns (ReserveStockResponse);
+  // ReleaseStock returns an order's reserved stock. Idempotent per order_id.
+  rpc ReleaseStock(ReleaseStockRequest) returns (ReleaseStockResponse);
+}
+
+message Stock {
+  string product_id = 1;
+  int32 available = 2;
+  int32 reserved = 3;
+}
+
+message GetStockRequest {
+  string product_id = 1;
+}
+
+message GetStockResponse {
+  Stock stock = 1;
+}
+
+message SetStockRequest {
+  string product_id = 1;
+  int32 available = 2;
+}
+
+message SetStockResponse {
+  Stock stock = 1;
+}
+
+message AdjustStockRequest {
+  string product_id = 1;
+  int32 delta = 2;
+}
+
+message AdjustStockResponse {
+  Stock stock = 1;
+}
+
+message ReservationLine {
+  string product_id = 1;
+  int32 quantity = 2;
+}
+
+message ReserveStockRequest {
+  string order_id = 1;
+  repeated ReservationLine lines = 2;
+}
+
+message ReserveStockResponse {}
+
+message ReleaseStockRequest {
+  string order_id = 1;
+}
+
+message ReleaseStockResponse {}

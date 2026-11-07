@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package vendora.payment.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// PaymentService charges orders through a payment provider adapter.
+service PaymentService {
+  // PayOrder charges the order's authoritative total. Idempotent per order:
+  // paying an already-paid order returns the existing payment.
+  rpc PayOrder(PayOrderRequest) returns (PayOrderResponse);
+  rpc GetPaymentByOrder(GetPaymentByOrderRequest) returns (GetPaymentByOrderResponse);
+}
+
+enum PaymentStatus {
+  PAYMENT_STATUS_UNSPECIFIED = 0;
+  PAYMENT_STATUS_PENDING = 1;
+  PAYMENT_STATUS_SUCCEEDED = 2;
+  PAYMENT_STATUS_FAILED = 3;
+  // The order was cancelled after a successful charge (e.g. it timed out
+  // concurrently), so the charge was refunded.
+  PAYMENT_STATUS_REFUNDED = 4;
+}
+
+message Payment {
+  string id = 1;
+  string order_id = 2;
+  string user_id = 3;
+  int64 amount_cents = 4;
+  string currency = 5;
+  PaymentStatus status = 6;
+  string failure_reason = 7;
+  string provider_reference = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+}
+
+message PayOrderRequest {
+  string order_id = 1;
+  string user_id = 2;
+  // Token from the payment provider. The built-in fake provider declines
+  // "tok_decline" and approves everything else.
+  string payment_method_token = 3;
+}
+
+message PayOrderResponse {
+  Payment payment = 1;
+}
+
+message GetPaymentByOrderRequest {
+  string order_id = 1;
+  string user_id = 2;
+}
+
+message GetPaymentByOrderResponse {
+  Payment payment = 1;
+}

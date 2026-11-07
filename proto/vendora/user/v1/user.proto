@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package vendora.user.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// UserService owns identity: accounts, credentials and token issuance.
+service UserService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Login(LoginRequest) returns (LoginResponse);
+  // Refresh exchanges a refresh token for a new token pair (rotation).
+  rpc Refresh(RefreshRequest) returns (RefreshResponse);
+  // Logout revokes a refresh token.
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+}
+
+message User {
+  string id = 1;
+  string email = 2;
+  string first_name = 3;
+  string last_name = 4;
+  string role = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message TokenPair {
+  string access_token = 1;
+  google.protobuf.Timestamp access_token_expires_at = 2;
+  string refresh_token = 3;
+  google.protobuf.Timestamp refresh_token_expires_at = 4;
+}
+
+message RegisterRequest {
+  string email = 1;
+  string password = 2;
+  string first_name = 3;
+  string last_name = 4;
+}
+
+message RegisterResponse {
+  User user = 1;
+  TokenPair tokens = 2;
+}
+
+message LoginRequest {
+  string email = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  User user = 1;
+  TokenPair tokens = 2;
+}
+
+message RefreshRequest {
+  string refresh_token = 1;
+}
+
+message RefreshResponse {
+  TokenPair tokens = 1;
+}
+
+message LogoutRequest {
+  string refresh_token = 1;
+}
+
+message LogoutResponse {}
+
+message GetUserRequest {
+  string id = 1;
+}
+
+message GetUserResponse {
+  User user = 1;
+}
