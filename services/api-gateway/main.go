@@ -1,166 +1,146 @@
+// Command api-gateway is the public REST entry point of VENDORA.
 package main
 
 import (
-	"log"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
-	"os"
-	"os/signal"
-	"strings"
-	"syscall"
+	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	httpSwagger "github.com/swaggo/http-swagger"
+	"github.com/go-redis/redis_rate/v10"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
-	"github.com/ayushdevani/forgecart/gen"
-	"github.com/ayushdevani/forgecart/pkg/config"
-	"github.com/ayushdevani/forgecart/pkg/health"
-	authMw "github.com/ayushdevani/forgecart/pkg/middleware"
-	"github.com/ayushdevani/forgecart/services/api-gateway/handlers"
-
-	_ "github.com/ayushdevani/forgecart/services/api-gateway/docs"
+	cartv1 "github.com/Varsh1l01/VENDORA/gen/vendora/cart/v1"
+	inventoryv1 "github.com/Varsh1l01/VENDORA/gen/vendora/inventory/v1"
+	orderv1 "github.com/Varsh1l01/VENDORA/gen/vendora/order/v1"
+	paymentv1 "github.com/Varsh1l01/VENDORA/gen/vendora/payment/v1"
+	productv1 "github.com/Varsh1l01/VENDORA/gen/vendora/product/v1"
+	userv1 "github.com/Varsh1l01/VENDORA/gen/vendora/user/v1"
+	"github.com/Varsh1l01/VENDORA/pkg/admin"
+	"github.com/Varsh1l01/VENDORA/pkg/auth"
+	"github.com/Varsh1l01/VENDORA/pkg/config"
+	"github.com/Varsh1l01/VENDORA/pkg/grpcx"
+	"github.com/Varsh1l01/VENDORA/pkg/lifecycle"
+	"github.com/Varsh1l01/VENDORA/pkg/logx"
+	"github.com/Varsh1l01/VENDORA/services/api-gateway/server"
 )
 
-// @title           ForgeCart API
-// @version         1.0
-// @description     E-commerce microservices backend API. This gateway routes requests to individual microservices via gRPC.
-// @description
-// @description     ## Architecture
-// @description     - **user-service**: Authentication and user management
-// @description     - **product-service**: Product catalog management
-// @description     - **cart-service**: Shopping cart operations
-// @description     - **order-service**: Order processing
-// @description     - **payment-service**: Payment processing
-// @description     - **inventory-service**: Stock management
-
-// @host            shop.launch-pad.dev
-// @schemes         https
-// @BasePath        /
-
-// @securityDefinitions.apikey BearerAuth
-// @in header
-// @name Authorization
-// @description Enter your JWT token with the `Bearer ` prefix, e.g. `Bearer eyJhbGciOiJIUzI1NiIs...`
+const name = "api-gateway"
 
 func main() {
-	port := config.GetEnv("API_GATEWAY_PORT", "8080")
-	jwtSecret := config.GetEnv("JWT_SECRET", "super-secret-jwt-key")
+	l := config.New()
+	common := l.LoadCommon(name)
+	lifecycle.HandleHealthcheckFlag(common.AdminAddr)
 
-	userConn := mustConnect(config.GetEnv("USER_SERVICE_ADDR", "localhost:50051"))
-	productConn := mustConnect(config.GetEnv("PRODUCT_SERVICE_ADDR", "localhost:50052"))
-	cartConn := mustConnect(config.GetEnv("CART_SERVICE_ADDR", "localhost:50053"))
-	orderConn := mustConnect(config.GetEnv("ORDER_SERVICE_ADDR", "localhost:50054"))
-	paymentConn := mustConnect(config.GetEnv("PAYMENT_SERVICE_ADDR", "localhost:50055"))
-	inventoryConn := mustConnect(config.GetEnv("INVENTORY_SERVICE_ADDR", "localhost:50056"))
-
-	defer userConn.Close()
-	defer productConn.Close()
-	defer cartConn.Close()
-	defer orderConn.Close()
-	defer paymentConn.Close()
-	defer inventoryConn.Close()
-
-	clients := &handlers.Clients{
-		User:      gen.NewUserServiceClient(userConn),
-		Product:   gen.NewProductServiceClient(productConn),
-		Cart:      gen.NewCartServiceClient(cartConn),
-		Order:     gen.NewOrderServiceClient(orderConn),
-		Payment:   gen.NewPaymentServiceClient(paymentConn),
-		Inventory: gen.NewInventoryServiceClient(inventoryConn),
+	httpAddr := l.String("HTTP_ADDR", ":8080")
+	addrs := map[string]string{
+		"user":      l.Required("USER_SERVICE_ADDR"),
+		"product":   l.Required("PRODUCT_SERVICE_ADDR"),
+		"cart":      l.Required("CART_SERVICE_ADDR"),
+		"order":     l.Required("ORDER_SERVICE_ADDR"),
+		"payment":   l.Required("PAYMENT_SERVICE_ADDR"),
+		"inventory": l.Required("INVENTORY_SERVICE_ADDR"),
+	}
+	cfg := server.Config{
+		CORSOrigins:       l.List("CORS_ALLOWED_ORIGINS", nil),
+		TrustProxyHeaders: l.Bool("TRUST_PROXY_HEADERS", false),
+		RequestTimeout:    l.Duration("REQUEST_TIMEOUT", 10*time.Second),
+		AuthPerMinute:     l.Int("RATE_LIMIT_AUTH_PER_MIN", 20),
+		WritePerMinute:    l.Int("RATE_LIMIT_WRITE_PER_MIN", 120),
+		ReadPerMinute:     l.Int("RATE_LIMIT_READ_PER_MIN", 600),
+	}
+	redisAddr := l.String("REDIS_ADDR", "")
+	redisPassword := l.String("REDIS_PASSWORD", "")
+	logx.New(name, common.LogLevel)
+	if err := l.Err(); err != nil {
+		lifecycle.Fatal("invalid configuration", err)
 	}
 
-	r := chi.NewRouter()
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
-	r.Use(corsMiddleware)
+	ctx, stop := lifecycle.SignalContext()
+	defer stop()
 
-	r.Get("/health", health.Handler("api-gateway"))
-
-	// Swagger UI
-	r.Get("/swagger/*", httpSwagger.Handler(
-		httpSwagger.URL("/swagger/doc.json"),
-	))
-
-	// Auth
-	r.Post("/api/auth/register", handlers.Register(clients.User))
-	r.Post("/api/auth/login", handlers.Login(clients.User))
-
-	r.Get("/api/products", handlers.ListProducts(clients.Product))
-	r.Get("/api/products/{id}", handlers.GetProduct(clients.Product))
-
-	// Inventory
-	r.Get("/api/inventory/{productId}", handlers.GetStock(clients.Inventory))
-
-	// Protected routes
-	r.Group(func(r chi.Router) {
-		r.Use(authMw.Auth(jwtSecret))
-
-		// Cart
-		r.Get("/api/cart", handlers.GetCart(clients.Cart))
-		r.Post("/api/cart/items", handlers.AddToCart(clients.Cart))
-		r.Delete("/api/cart/items/{productId}", handlers.RemoveFromCart(clients.Cart))
-
-		// Orders
-		r.Post("/api/orders", handlers.CreateOrder(clients.Order))
-		r.Get("/api/orders", handlers.ListOrders(clients.Order))
-		r.Get("/api/orders/{id}", handlers.GetOrder(clients.Order))
-
-		r.Post("/api/payments", handlers.CreatePayment(clients.Payment))
-		r.Get("/api/payments/order/{orderId}", handlers.GetPayment(clients.Payment))
-	})
-
-	// Admin-only routes
-	r.Group(func(r chi.Router) {
-		r.Use(authMw.Auth(jwtSecret))
-		r.Use(authMw.RequireAdmin)
-
-		r.Post("/api/products", handlers.CreateProduct(clients.Product))
-	})
-
-	go func() {
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		<-sigChan
-		log.Println("Shutting down API Gateway...")
-		os.Exit(0)
-	}()
-
-	log.Printf("API Gateway starting on port %s", port)
-	log.Printf("Swagger UI available at http://localhost:%s/swagger/index.html", port)
-	log.Fatal(http.ListenAndServe(":"+port, r))
-}
-
-func mustConnect(addr string) *grpc.ClientConn {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		log.Fatalf("Failed to connect to %s: %v", addr, err)
+	conns := map[string]*grpc.ClientConn{}
+	for svc, addr := range addrs {
+		// No service identity: the gateway only forwards end-user tokens, so it
+		// can never exceed the caller's own permissions.
+		c, err := grpcx.Dial(addr, grpcx.ClientOptions{Timeout: 5 * time.Second})
+		if err != nil {
+			lifecycle.Fatal("dial "+svc, err)
+		}
+		defer c.Close()
+		conns[svc] = c
 	}
-	log.Printf("Connected to %s", addr)
-	return conn
-}
+	clients := server.Clients{
+		User:      userv1.NewUserServiceClient(conns["user"]),
+		Product:   productv1.NewProductServiceClient(conns["product"]),
+		Cart:      cartv1.NewCartServiceClient(conns["cart"]),
+		Order:     orderv1.NewOrderServiceClient(conns["order"]),
+		Payment:   paymentv1.NewPaymentServiceClient(conns["payment"]),
+		Inventory: inventoryv1.NewInventoryServiceClient(conns["inventory"]),
+	}
 
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		allowedOrigins := strings.Split(config.GetEnv("CORS_ORIGINS", "*"), ",")
-
-		for _, allowed := range allowedOrigins {
-			if allowed == "*" || allowed == origin {
-				w.Header().Set("Access-Control-Allow-Origin", origin)
-				break
+	checks := make([]admin.Check, 0, len(conns)+1)
+	for svc, c := range conns {
+		hc := healthpb.NewHealthClient(c)
+		checks = append(checks, admin.Check{Name: svc, Fn: func(ctx context.Context) error {
+			resp, err := hc.Check(ctx, &healthpb.HealthCheckRequest{})
+			if err != nil {
+				return err
 			}
-		}
+			if resp.GetStatus() != healthpb.HealthCheckResponse_SERVING {
+				return fmt.Errorf("status %s", resp.GetStatus())
+			}
+			return nil
+		}})
+	}
 
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	var limiter *redis_rate.Limiter
+	if redisAddr != "" {
+		rdb := redis.NewClient(&redis.Options{Addr: redisAddr, Password: redisPassword, DB: 2,
+			DialTimeout: time.Second, ReadTimeout: 200 * time.Millisecond, WriteTimeout: 200 * time.Millisecond})
+		defer rdb.Close()
+		limiter = redis_rate.NewLimiter(rdb)
+		checks = append(checks, admin.Check{Name: "redis", Fn: func(ctx context.Context) error { return rdb.Ping(ctx).Err() }})
+	} else {
+		slog.Warn("REDIS_ADDR not set: rate limiting disabled")
+	}
 
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
+	tokens := auth.NewTokens(common.JWTSecret, common.JWTIssuer, common.JWTAudience)
+	srv := &http.Server{
+		Addr:              httpAddr,
+		Handler:           server.New(cfg, tokens, clients, limiter).Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+	adm := admin.New(common.AdminAddr, checks...)
 
-		next.ServeHTTP(w, r)
-	})
+	err := lifecycle.Run(ctx, adm.SetDraining,
+		lifecycle.Component{Name: "http", Run: func(ctx context.Context) error {
+			errc := make(chan error, 1)
+			go func() { errc <- srv.ListenAndServe() }()
+			slog.Info("http server listening", "addr", httpAddr)
+			select {
+			case err := <-errc:
+				if errors.Is(err, http.ErrServerClosed) {
+					return nil
+				}
+				return err
+			case <-ctx.Done():
+			}
+			shCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), common.ShutdownTTL)
+			defer cancel()
+			return srv.Shutdown(shCtx)
+		}},
+		lifecycle.Component{Name: "admin", Run: adm.Run},
+	)
+	if err != nil {
+		lifecycle.Fatal("gateway stopped with error", err)
+	}
 }

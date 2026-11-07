@@ -1,121 +1,103 @@
+// Command notification-service emails customers about account, order and
+// payment events.
 package main
 
 import (
 	"context"
-	"encoding/json"
-	"log"
-	"os"
-	"os/signal"
-	"syscall"
+	"time"
 
-	"github.com/ayushdevani/forgecart/pkg/config"
-	"github.com/ayushdevani/forgecart/pkg/kafka"
-	"github.com/ayushdevani/forgecart/services/notification-service/email"
+	userv1 "github.com/Varsh1l01/VENDORA/gen/vendora/user/v1"
+	"github.com/Varsh1l01/VENDORA/pkg/admin"
+	"github.com/Varsh1l01/VENDORA/pkg/apperr"
+	"github.com/Varsh1l01/VENDORA/pkg/auth"
+	"github.com/Varsh1l01/VENDORA/pkg/config"
+	"github.com/Varsh1l01/VENDORA/pkg/db"
+	"github.com/Varsh1l01/VENDORA/pkg/events"
+	"github.com/Varsh1l01/VENDORA/pkg/grpcx"
+	"github.com/Varsh1l01/VENDORA/pkg/kafka"
+	"github.com/Varsh1l01/VENDORA/pkg/lifecycle"
+	"github.com/Varsh1l01/VENDORA/pkg/logx"
+	"github.com/Varsh1l01/VENDORA/services/notification-service/migrations"
+	"github.com/Varsh1l01/VENDORA/services/notification-service/notifier"
 )
 
-// Event data structures
-type UserRegisteredData struct {
-	UserID    string `json:"user_id"`
-	Email     string `json:"email"`
-	FirstName string `json:"first_name"`
-}
+const name = "notification-service"
 
-type OrderCreatedData struct {
-	OrderID string  `json:"order_id"`
-	UserID  string  `json:"user_id"`
-	Email   string  `json:"email"`
-	Total   float64 `json:"total"`
-}
+type userClient struct{ c userv1.UserServiceClient }
 
-type OrderStatusUpdatedData struct {
-	OrderID string `json:"order_id"`
-	UserID  string `json:"user_id"`
-	Email   string `json:"email"`
-	Status  string `json:"status"`
-}
-
-type PaymentCompletedData struct {
-	PaymentID string  `json:"payment_id"`
-	OrderID   string  `json:"order_id"`
-	UserID    string  `json:"user_id"`
-	Email     string  `json:"email"`
-	Amount    float64 `json:"amount"`
+func (u userClient) Contact(ctx context.Context, id string) (string, string, error) {
+	resp, err := u.c.GetUser(ctx, &userv1.GetUserRequest{Id: id})
+	if err != nil {
+		return "", "", apperr.FromStatus(err, "user.GetUser")
+	}
+	return resp.GetUser().GetEmail(), resp.GetUser().GetFirstName(), nil
 }
 
 func main() {
-	brokers := config.GetEnv("KAFKA_BROKERS", "localhost:9092")
-	topic := config.GetEnv("KAFKA_TOPIC", "notifications")
-	groupID := config.GetEnv("KAFKA_GROUP_ID", "notification-service")
+	l := config.New()
+	common := l.LoadCommon(name)
+	lifecycle.HandleHealthcheckFlag(common.AdminAddr)
 
-	emailSvc := email.NewEmailService()
-	consumer := kafka.NewConsumer([]string{brokers}, topic, groupID)
-	defer consumer.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Graceful shutdown
-	go func() {
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		<-sigChan
-		log.Println("Shutting down Notification Service...")
-		cancel()
-	}()
-
-	log.Printf("Notification Service started, consuming from topic: %s", topic)
-
-	err := consumer.Consume(ctx, func(ctx context.Context, event kafka.Event) error {
-		return handleEvent(emailSvc, event)
-	})
-
-	if err != nil && err != context.Canceled {
-		log.Fatalf("Consumer error: %v", err)
+	poolCfg := db.LoadPoolConfig(l, "NOTIFICATION_DB")
+	brokers := l.List("KAFKA_BROKERS", nil)
+	if len(brokers) == 0 {
+		l.Required("KAFKA_BROKERS")
 	}
-}
-
-func handleEvent(emailSvc *email.EmailService, event kafka.Event) error {
-	log.Printf("[EVENT] Type: %s", event.Type)
-
-	switch event.Type {
-	case "user.registered":
-		var data UserRegisteredData
-		if err := unmarshalData(event.Data, &data); err != nil {
-			return err
+	userAddr := l.Required("USER_SERVICE_ADDR")
+	smtpEnabled := l.Bool("SMTP_ENABLED", false)
+	var mailer notifier.Mailer = notifier.LogMailer{}
+	if smtpEnabled {
+		mailer = notifier.SMTPMailer{
+			Host: l.Required("SMTP_HOST"), Port: l.String("SMTP_PORT", "587"),
+			Username: l.String("SMTP_USERNAME", ""), Password: l.String("SMTP_PASSWORD", ""),
+			From: l.Required("SMTP_FROM"),
 		}
-		return emailSvc.SendWelcome(data.Email, data.FirstName)
-
-	case "order.created":
-		var data OrderCreatedData
-		if err := unmarshalData(event.Data, &data); err != nil {
-			return err
-		}
-		return emailSvc.SendOrderConfirmation(data.Email, data.OrderID, data.Total)
-
-	case "order.status.updated":
-		var data OrderStatusUpdatedData
-		if err := unmarshalData(event.Data, &data); err != nil {
-			return err
-		}
-		return emailSvc.SendOrderStatusUpdate(data.Email, data.OrderID, data.Status)
-
-	case "payment.completed":
-		var data PaymentCompletedData
-		if err := unmarshalData(event.Data, &data); err != nil {
-			return err
-		}
-		return emailSvc.SendPaymentReceipt(data.Email, data.PaymentID, data.OrderID, data.Amount)
-
-	default:
-		log.Printf("[WARN] Unknown event type: %s", event.Type)
+	}
+	logx.New(name, common.LogLevel)
+	if err := l.Err(); err != nil {
+		lifecycle.Fatal("invalid configuration", err)
 	}
 
-	return nil
-}
+	ctx, stop := lifecycle.SignalContext()
+	defer stop()
+	startCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
 
-func unmarshalData(data interface{}, target interface{}) error {
-	bytes, err := json.Marshal(data)
+	pool, err := db.Open(startCtx, poolCfg, "notifications")
 	if err != nil {
-		return err
+		lifecycle.Fatal("open database", err)
 	}
-	return json.Unmarshal(bytes, target)
+	defer pool.Close()
+	if err := db.Migrate(startCtx, pool, migrations.FS); err != nil {
+		lifecycle.Fatal("migrate", err)
+	}
+	if err := kafka.EnsureTopics(startCtx, brokers, 3, 1, events.AllTopics()...); err != nil {
+		lifecycle.Fatal("ensure topics", err)
+	}
+
+	tokens := auth.NewTokens(common.JWTSecret, common.JWTIssuer, common.JWTAudience)
+	userConn, err := grpcx.Dial(userAddr, grpcx.ClientOptions{ServiceIdentity: grpcx.NewServiceIdentity(tokens, name)})
+	if err != nil {
+		lifecycle.Fatal("dial user-service", err)
+	}
+	defer userConn.Close()
+
+	n := &notifier.Notifier{
+		Users:  userClient{c: userv1.NewUserServiceClient(userConn)},
+		Mailer: mailer,
+		Log:    notifier.PGLog{Pool: pool},
+	}
+	cons := kafka.NewConsumer(kafka.ConsumerConfig{
+		Brokers: brokers, GroupID: notifier.Group,
+		Topics: []string{events.TopicUser, events.TopicOrder, events.TopicPayment},
+	}, n.Handle)
+
+	adm := admin.New(common.AdminAddr, admin.Check{Name: "postgres", Fn: pool.Ping})
+	err = lifecycle.Run(ctx, adm.SetDraining,
+		lifecycle.Component{Name: "admin", Run: adm.Run},
+		lifecycle.Component{Name: "consumer", Run: cons.Run},
+	)
+	if err != nil {
+		lifecycle.Fatal("service stopped with error", err)
+	}
 }

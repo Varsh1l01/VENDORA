@@ -1,0 +1,457 @@
+openapi: 3.1.0
+info:
+  title: VENDORA API
+  version: 1.0.0
+  description: |
+    REST gateway for the VENDORA e-commerce backend.
+
+    * Money is always an integer number of cents (`*_cents`) plus a `currency`.
+    * Errors use RFC 9457 `application/problem+json` and include `request_id`.
+    * Every response carries an `X-Request-ID` header; send your own to correlate.
+    * Lists use cursor pagination: pass `next_page_token` back as `page_token`.
+    * Checkout (`POST /orders`) requires an `Idempotency-Key` header; retrying
+      with the same key returns the same order.
+    * The built-in fake payment provider declines `tok_decline` and fails
+      transiently on `tok_error`; any other token succeeds.
+servers:
+  - url: http://localhost:8080
+security:
+  - bearerAuth: []
+tags:
+  - name: auth
+  - name: catalog
+  - name: cart
+  - name: orders
+  - name: admin
+paths:
+  /api/v1/auth/register:
+    post:
+      tags: [auth]
+      security: []
+      summary: Create a customer account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, first_name, last_name]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8, maxLength: 72 }
+                first_name: { type: string, maxLength: 100 }
+                last_name: { type: string, maxLength: 100 }
+      responses:
+        "201": { description: Account created, content: { application/json: { schema: { $ref: "#/components/schemas/AuthResponse" } } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      security: []
+      summary: Exchange credentials for tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        "200": { description: Authenticated, content: { application/json: { schema: { $ref: "#/components/schemas/AuthResponse" } } } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      security: []
+      summary: Rotate a refresh token (reuse of an old token revokes all sessions)
+      requestBody: { $ref: "#/components/requestBodies/RefreshToken" }
+      responses:
+        "200": { description: New token pair, content: { application/json: { schema: { type: object, properties: { tokens: { $ref: "#/components/schemas/TokenPair" } } } } } }
+        "401": { $ref: "#/components/responses/Problem" }
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      security: []
+      summary: Revoke a refresh token
+      requestBody: { $ref: "#/components/requestBodies/RefreshToken" }
+      responses:
+        "204": { description: Revoked }
+  /api/v1/me:
+    get:
+      tags: [auth]
+      summary: Current user
+      responses:
+        "200": { description: User, content: { application/json: { schema: { type: object, properties: { user: { $ref: "#/components/schemas/User" } } } } } }
+        "401": { $ref: "#/components/responses/Problem" }
+  /api/v1/products:
+    get:
+      tags: [catalog]
+      security: []
+      summary: List active products (newest first)
+      parameters:
+        - { $ref: "#/components/parameters/PageSize" }
+        - { $ref: "#/components/parameters/PageToken" }
+      responses:
+        "200":
+          description: Page of products
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  products: { type: array, items: { $ref: "#/components/schemas/Product" } }
+                  next_page_token: { type: string }
+  /api/v1/products/{id}:
+    get:
+      tags: [catalog]
+      security: []
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200": { description: Product, content: { application/json: { schema: { type: object, properties: { product: { $ref: "#/components/schemas/Product" } } } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/products/{id}/stock:
+    get:
+      tags: [catalog]
+      security: []
+      summary: Available stock (reserved counts are visible to admins only)
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200": { description: Stock, content: { application/json: { schema: { type: object, properties: { stock: { $ref: "#/components/schemas/Stock" } } } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/cart:
+    get:
+      tags: [cart]
+      summary: The caller's cart, priced from the live catalog
+      responses:
+        "200": { $ref: "#/components/responses/Cart" }
+    delete:
+      tags: [cart]
+      summary: Empty the cart
+      responses:
+        "204": { description: Emptied }
+  /api/v1/cart/items:
+    post:
+      tags: [cart]
+      summary: Add a product (quantity is added to any existing line, capped at 99)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [product_id, quantity]
+              properties:
+                product_id: { type: string, format: uuid }
+                quantity: { type: integer, minimum: 1, maximum: 99 }
+      responses:
+        "200": { $ref: "#/components/responses/Cart" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/cart/items/{productId}:
+    parameters:
+      - { name: productId, in: path, required: true, schema: { type: string, format: uuid } }
+    put:
+      tags: [cart]
+      summary: Set a line's quantity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [quantity], properties: { quantity: { type: integer, minimum: 1, maximum: 99 } } }
+      responses:
+        "200": { $ref: "#/components/responses/Cart" }
+    delete:
+      tags: [cart]
+      summary: Remove a line
+      responses:
+        "200": { $ref: "#/components/responses/Cart" }
+  /api/v1/orders:
+    post:
+      tags: [orders]
+      summary: Check out the cart
+      description: |
+        Prices are taken from the catalog, all stock is reserved atomically and
+        the order moves to `ORDER_STATUS_AWAITING_PAYMENT`. Pay it with
+        `POST /orders/{id}/payment` before the payment timeout (default 15 min).
+      parameters:
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string, maxLength: 100 } }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { shipping_address: { type: string, maxLength: 500 } } }
+      responses:
+        "201": { $ref: "#/components/responses/Order" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "422": { description: Cart empty, product unavailable or insufficient stock, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+        "503": { $ref: "#/components/responses/Problem" }
+    get:
+      tags: [orders]
+      summary: The caller's orders, newest first
+      parameters:
+        - { $ref: "#/components/parameters/PageSize" }
+        - { $ref: "#/components/parameters/PageToken" }
+      responses:
+        "200":
+          description: Page of orders
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  orders: { type: array, items: { $ref: "#/components/schemas/Order" } }
+                  next_page_token: { type: string }
+  /api/v1/orders/{id}:
+    get:
+      tags: [orders]
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Order" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/orders/{id}/cancel:
+    post:
+      tags: [orders]
+      summary: Cancel an unpaid order (reserved stock is released)
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Order" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/orders/{id}/payment:
+    parameters: [{ $ref: "#/components/parameters/ID" }]
+    post:
+      tags: [orders]
+      summary: Pay an order (idempotent; the amount is the order total)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { payment_method_token: { type: string, example: tok_visa } } }
+      responses:
+        "200": { $ref: "#/components/responses/Payment" }
+        "402": { $ref: "#/components/responses/Payment" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    get:
+      tags: [orders]
+      responses:
+        "200": { $ref: "#/components/responses/Payment" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/admin/products:
+    post:
+      tags: [admin]
+      summary: Create a product (stock is provisioned asynchronously)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, price_cents]
+              properties:
+                name: { type: string, maxLength: 200 }
+                description: { type: string, maxLength: 5000 }
+                price_cents: { type: integer, minimum: 0 }
+                image_url: { type: string, format: uri }
+                initial_stock: { type: integer, minimum: 0 }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { type: object, properties: { product: { $ref: "#/components/schemas/Product" } } } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+  /api/v1/admin/products/{id}:
+    parameters: [{ $ref: "#/components/parameters/ID" }]
+    patch:
+      tags: [admin]
+      summary: Partially update a product (omitted fields are unchanged)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string }
+                price_cents: { type: integer }
+                image_url: { type: string }
+                is_active: { type: boolean }
+      responses:
+        "200": { description: Updated }
+    delete:
+      tags: [admin]
+      summary: Deactivate a product (soft delete)
+      responses:
+        "204": { description: Deactivated }
+  /api/v1/admin/inventory/{productId}:
+    put:
+      tags: [admin]
+      summary: Set absolute available stock
+      parameters: [{ name: productId, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [available], properties: { available: { type: integer, minimum: 0 } } }
+      responses:
+        "200": { description: Stock, content: { application/json: { schema: { type: object, properties: { stock: { $ref: "#/components/schemas/Stock" } } } } } }
+  /api/v1/admin/inventory/{productId}/adjust:
+    post:
+      tags: [admin]
+      summary: Add a (possibly negative) delta to available stock
+      parameters: [{ name: productId, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [delta], properties: { delta: { type: integer } } }
+      responses:
+        "200": { description: Stock }
+        "422": { $ref: "#/components/responses/Problem" }
+  /api/v1/admin/orders/{id}/status:
+    patch:
+      tags: [admin]
+      summary: Fulfilment transition (CONFIRMED→SHIPPED→DELIVERED)
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [status], properties: { status: { type: string, enum: [SHIPPED, DELIVERED] } } }
+      responses:
+        "200": { $ref: "#/components/responses/Order" }
+        "422": { $ref: "#/components/responses/Problem" }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    ID: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    PageSize: { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+    PageToken: { name: page_token, in: query, schema: { type: string } }
+  requestBodies:
+    RefreshToken:
+      required: true
+      content:
+        application/json:
+          schema: { type: object, required: [refresh_token], properties: { refresh_token: { type: string } } }
+  responses:
+    Problem:
+      description: Error
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Cart:
+      description: Cart
+      content: { application/json: { schema: { type: object, properties: { cart: { $ref: "#/components/schemas/Cart" } } } } }
+    Order:
+      description: Order
+      content: { application/json: { schema: { type: object, properties: { order: { $ref: "#/components/schemas/Order" } } } } }
+    Payment:
+      description: Payment (402 when declined)
+      content: { application/json: { schema: { type: object, properties: { payment: { $ref: "#/components/schemas/Payment" } } } } }
+  schemas:
+    Problem:
+      type: object
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        request_id: { type: string }
+    TokenPair:
+      type: object
+      properties:
+        access_token: { type: string }
+        access_token_expires_at: { type: string, format: date-time }
+        refresh_token: { type: string }
+        refresh_token_expires_at: { type: string, format: date-time }
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        first_name: { type: string }
+        last_name: { type: string }
+        role: { type: string, enum: [customer, admin] }
+        created_at: { type: string, format: date-time }
+    AuthResponse:
+      type: object
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        tokens: { $ref: "#/components/schemas/TokenPair" }
+    Product:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        price_cents: { type: integer }
+        currency: { type: string }
+        image_url: { type: string }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Stock:
+      type: object
+      properties:
+        product_id: { type: string, format: uuid }
+        available: { type: integer }
+        reserved: { type: integer }
+    Cart:
+      type: object
+      properties:
+        user_id: { type: string }
+        total_cents: { type: integer }
+        currency: { type: string }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              product_id: { type: string }
+              name: { type: string }
+              unit_price_cents: { type: integer }
+              quantity: { type: integer }
+              line_total_cents: { type: integer }
+              image_url: { type: string }
+              available: { type: boolean }
+    Order:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [ORDER_STATUS_PENDING, ORDER_STATUS_AWAITING_PAYMENT, ORDER_STATUS_CONFIRMED, ORDER_STATUS_SHIPPED,
+                 ORDER_STATUS_DELIVERED, ORDER_STATUS_CANCELLED, ORDER_STATUS_REJECTED]
+        status_reason: { type: string }
+        total_cents: { type: integer }
+        currency: { type: string }
+        shipping_address: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              product_id: { type: string }
+              name: { type: string }
+              unit_price_cents: { type: integer }
+              quantity: { type: integer }
+              line_total_cents: { type: integer }
+    Payment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        order_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        amount_cents: { type: integer }
+        currency: { type: string }
+        status: { type: string, enum: [PAYMENT_STATUS_PENDING, PAYMENT_STATUS_SUCCEEDED, PAYMENT_STATUS_FAILED, PAYMENT_STATUS_REFUNDED] }
+        failure_reason: { type: string }
+        provider_reference: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
