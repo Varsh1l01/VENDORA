@@ -1,0 +1,222 @@
+# Run with: docker-compose up -d
+
+version: '3.8'
+
+services:
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - SERVER_PORT=8080
+      - USER_SERVICE_ADDR=user-service:50051
+      - PRODUCT_SERVICE_ADDR=product-service:50052
+      - CART_SERVICE_ADDR=cart-service:50053
+      - ORDER_SERVICE_ADDR=order-service:50054
+      - PAYMENT_SERVICE_ADDR=payment-service:50055
+      - INVENTORY_SERVICE_ADDR=inventory-service:50056
+      - JWT_SECRET=super-secret-jwt-key
+    depends_on:
+      - user-service
+      - product-service
+      - cart-service
+      - order-service
+      - payment-service
+      - inventory-service
+
+  user-service:
+    build:
+      context: .
+      dockerfile: services/user-service/Dockerfile
+    environment:
+      - USER_SERVICE_PORT=50051
+      - USER_DB_URL=postgres://forgecart:forgecart_pass@postgres:5432/users_db?sslmode=disable
+      - JWT_SECRET=super-secret-jwt-key
+      - KAFKA_BROKERS=kafka:29092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  product-service:
+    build:
+      context: .
+      dockerfile: services/product-service/Dockerfile
+    environment:
+      - PRODUCT_SERVICE_PORT=50052
+      - PRODUCT_DB_URL=postgres://forgecart:forgecart_pass@postgres:5432/products_db?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  cart-service:
+    build:
+      context: .
+      dockerfile: services/cart-service/Dockerfile
+    environment:
+      - CART_SERVICE_PORT=50053
+      - REDIS_URL=redis:6379
+      - PRODUCT_SERVICE_ADDR=product-service:50052
+    depends_on:
+      redis:
+        condition: service_healthy
+      product-service:
+        condition: service_started
+
+  order-service:
+    build:
+      context: .
+      dockerfile: services/order-service/Dockerfile
+    environment:
+      - ORDER_SERVICE_PORT=50054
+      - ORDER_DB_URL=postgres://forgecart:forgecart_pass@postgres:5432/orders_db?sslmode=disable
+      - KAFKA_BROKERS=kafka:29092
+      - CART_SERVICE_ADDR=cart-service:50053
+      - USER_SERVICE_ADDR=user-service:50051
+      - INVENTORY_SERVICE_ADDR=inventory-service:50056
+      - PAYMENT_SERVICE_ADDR=payment-service:50055
+      - PRODUCT_SERVICE_ADDR=product-service:50052
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      product-service:
+        condition: service_started
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: services/payment-service/Dockerfile
+    environment:
+      - PAYMENT_SERVICE_PORT=50055
+      - PAYMENT_DB_URL=postgres://forgecart:forgecart_pass@postgres:5432/payments_db?sslmode=disable
+      - KAFKA_BROKERS=kafka:29092
+      - USER_SERVICE_ADDR=user-service:50051
+      - ORDER_SERVICE_ADDR=order-service:50054
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: services/inventory-service/Dockerfile
+    environment:
+      - INVENTORY_SERVICE_PORT=50056
+      - INVENTORY_DB_URL=postgres://forgecart:forgecart_pass@postgres:5432/inventory_db?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+      - EMAIL_FROM=${EMAIL_FROM}
+      - SMTP_ENABLED=${SMTP_ENABLED}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USERNAME=${SMTP_USERNAME}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: forgecart-postgres
+    environment:
+      POSTGRES_USER: forgecart
+      POSTGRES_PASSWORD: forgecart_pass
+      POSTGRES_MULTIPLE_DATABASES: users_db,products_db,orders_db,payments_db,inventory_db,notifications_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/create-databases.sh:/docker-entrypoint-initdb.d/create-databases.sh
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U forgecart" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: forgecart-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: forgecart-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_HEAP_OPTS: "-Xmx256M -Xms256M"
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "localhost", "2181" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: forgecart-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M"
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: [ "CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list" ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: forgecart-kafka-ui
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: forgecart
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    depends_on:
+      - kafka
+volumes:
+  postgres_data:
+  redis_data:
+  zookeeper_data:
+  kafka_data:
