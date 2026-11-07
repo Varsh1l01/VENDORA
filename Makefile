@@ -1,111 +1,27 @@
-
-.PHONY: proto
-proto:
-	@echo "Generating Go code from proto files..."
-	buf generate
-	@echo "Proto generation complete!"
-
-.PHONY: proto-lint
-proto-lint:
-	buf lint
-
-.PHONY: swagger
-swagger:
-	@echo "Generating Swagger docs..."
-	cd services/api-gateway && swag init -g main.go -o docs
-	@echo "Swagger docs generated!"
-
-.PHONY: infra-up
-infra-up:
-	@echo "Starting infrastructure..."
-	docker-compose up -d postgres redis zookeeper kafka kafka-ui
-	@echo "Infrastructure started!"
-	@echo "Kafka UI: http://localhost:8090"
-
-.PHONY: up
-up:
-	docker-compose up -d --build
-
-.PHONY: down
+.PHONY: env up dev observability down clean logs proto lint test test-race build e2e
+env:            ## generate .env with random secrets
+	sh scripts/gen-env.sh
+up:             ## build and start the core stack
+	docker compose up -d --build
+dev:            ## core stack + published infra ports + Kafka UI
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+observability:  ## core stack + Prometheus (127.0.0.1:9091) + Grafana (127.0.0.1:3001)
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
 down:
-	docker-compose down
-
-.PHONY: clean
+	docker compose down
 clean:
-	docker-compose down -v
-	@echo "All containers and volumes removed!"
-
-.PHONY: logs
+	docker compose down -v
 logs:
-	docker-compose logs -f $(SERVICE)
-
-.PHONY: run-user
-run-user:
-	cd services/user-service && go run .
-
-.PHONY: run-product
-run-product:
-	cd services/product-service && go run .
-
-.PHONY: run-cart
-run-cart:
-	cd services/cart-service && go run .
-
-.PHONY: run-order
-run-order:
-	cd services/order-service && go run .
-
-.PHONY: run-payment
-run-payment:
-	cd services/payment-service && go run .
-
-.PHONY: run-inventory
-run-inventory:
-	cd services/inventory-service && go run .
-
-.PHONY: run-notification
-run-notification:
-	cd services/notification-service && go run .
-
-.PHONY: run-gateway
-run-gateway:
-	cd services/api-gateway && go run .
-
-.PHONY: test
+	docker compose logs -f $(SERVICE)
+proto:
+	buf lint && buf generate
+build:
+	go build ./...
 test:
-	go test ./... -v
-
-.PHONY: deps
-deps:
-	go install github.com/bufbuild/buf/cmd/buf@latest
-	go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-	@echo "All dependencies installed!"
-
-
-.PHONY: tidy
-tidy:
-	cd pkg && go mod tidy
-	cd services/user-service && go mod tidy
-	cd services/product-service && go mod tidy
-	cd services/cart-service && go mod tidy
-	cd services/order-service && go mod tidy
-	cd services/payment-service && go mod tidy
-	cd services/inventory-service && go mod tidy
-	cd services/notification-service && go mod tidy
-	cd services/api-gateway && go mod tidy
-
-
-# docs
-.PHONY: help
-help:
-	@echo "ForgeCart Makefile Commands:"
-	@echo ""
-	@echo "  make proto          - Generate Go code from .proto files"
-	@echo "  make infra-up       - Start infrastructure (Postgres, Redis, Kafka)"
-	@echo "  make up             - Start everything"
-	@echo "  make down           - Stop everything"
-	@echo "  make clean          - Stop and remove all data"
-	@echo "  make run-user       - Run user-service locally"
-	@echo "  make test           - Run all tests"
-	@echo "  make deps           - Install development dependencies"
+	go test ./...
+test-race:      ## requires cgo (runs natively on Linux/macOS/CI)
+	go test -race ./...
+lint:
+	go vet ./... && gofmt -l pkg services
+e2e:            ## end-to-end tests against the running stack (reads admin login from .env)
+	set -a; . ./.env; set +a; VENDORA_ADMIN_EMAIL="$$ADMIN_EMAIL" VENDORA_ADMIN_PASSWORD="$$ADMIN_PASSWORD" go test -tags e2e -count=1 -v ./tests/e2e

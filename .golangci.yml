@@ -1,0 +1,26 @@
+version: "2"
+run:
+  timeout: 5m
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - misspell
+  settings:
+    errcheck:
+      # Deferred Close calls on shutdown/cleanup paths: the error cannot be
+      # acted upon, and the process is exiting or the resource is done.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*google.golang.org/grpc.ClientConn).Close
+        - (*github.com/segmentio/kafka-go.Writer).Close
+        - (*github.com/segmentio/kafka-go.Reader).Close
+        - (*github.com/segmentio/kafka-go.Conn).Close
+        - (*github.com/redis/go-redis/v9.Client).Close
+  exclusions:
+    paths:
+      - gen
+    rules:
+      - path: _test\.go
+        linters: [errcheck]

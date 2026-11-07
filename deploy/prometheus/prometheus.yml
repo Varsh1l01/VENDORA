@@ -1,0 +1,24 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: vendora
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - api-gateway:9090
+          - user-service:9090
+          - product-service:9090
+          - cart-service:9090
+          - order-service:9090
+          - payment-service:9090
+          - inventory-service:9090
+          - notification-service:9090
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: "([^:]+):.*"
+        target_label: service

@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - name: gofmt
+        run: test -z "$(gofmt -l pkg services tests)"
+      - name: go vet
+        run: go vet ./... && go vet -tags e2e ./tests/...
+      - uses: golangci/golangci-lint-action@v8
+        with: { version: latest }
+      - uses: bufbuild/buf-action@v1
+        with:
+          lint: true
+          format: false
+          breaking: ${{ github.event_name == 'pull_request' }}
+          breaking_against: ${{ github.event.repository.clone_url }}#branch=main
+          push: false
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - name: unit tests (race detector)
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+      - uses: actions/upload-artifact@v4
+        with: { name: coverage, path: coverage.out }
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - name: generate .env
+        run: sh scripts/gen-env.sh
+      - name: start stack
+        run: docker compose up -d --build --wait --wait-timeout 300
+      - name: end-to-end tests
+        run: |
+          set -a; . ./.env; set +a
+          VENDORA_ADMIN_EMAIL="$ADMIN_EMAIL" VENDORA_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+            go test -tags e2e -count=1 -v ./tests/e2e
+      - name: logs on failure
+        if: failure()
+        run: docker compose logs --no-color | tail -n 500
+      - name: stop
+        if: always()
+        run: docker compose down -v

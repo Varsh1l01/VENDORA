@@ -1,0 +1,35 @@
+groups:
+  - name: vendora
+    rules:
+      - alert: HighHTTP5xxRate
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(http_server_request_duration_seconds_count[5m])), 1e-9) > 0.01
+        for: 5m
+        labels: { severity: page }
+        annotations: { summary: "Gateway 5xx rate above 1% for 5 minutes" }
+      - alert: CheckoutLatencyHigh
+        expr: |
+          histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket{route="/api/v1/orders",method="POST"}[5m]))) > 0.5
+        for: 10m
+        labels: { severity: ticket }
+        annotations: { summary: "p99 checkout latency above 500ms" }
+      - alert: OutboxStuck
+        expr: max by (service) (outbox_oldest_unpublished_age_seconds) > 60
+        for: 2m
+        labels: { severity: page }
+        annotations: { summary: "Outbox of {{ $labels.service }} not draining (events delayed)" }
+      - alert: EventsDeadLettered
+        expr: increase(events_dlq_total[15m]) > 0
+        labels: { severity: ticket }
+        annotations: { summary: "Events sent to a DLQ by {{ $labels.group }}" }
+      - alert: DBPoolSaturated
+        expr: max by (service, db) (db_pool_acquired_conns / db_pool_max_conns) > 0.9
+        for: 5m
+        labels: { severity: ticket }
+        annotations: { summary: "DB pool {{ $labels.db }} above 90% utilisation" }
+      - alert: ServiceDown
+        expr: up{job="vendora"} == 0
+        for: 1m
+        labels: { severity: page }
+        annotations: { summary: "{{ $labels.service }} is not being scraped" }

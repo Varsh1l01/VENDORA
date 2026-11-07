@@ -1,0 +1,18 @@
+# Development overlay: publishes infrastructure on 127.0.0.1 only and adds
+# Kafka UI.  Usage:  make dev   (or)
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+services:
+  postgres:
+    ports: ["127.0.0.1:5432:5432"]
+  redis:
+    ports: ["127.0.0.1:6379:6379"]
+  kafka:
+    ports: ["127.0.0.1:29092:29092"]
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    ports: ["127.0.0.1:8090:8080"]
+    environment:
+      KAFKA_CLUSTERS_0_NAME: vendora
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka: { condition: service_healthy }

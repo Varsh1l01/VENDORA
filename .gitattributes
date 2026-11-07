@@ -1,0 +1,4 @@
+# Normalize line endings: shell scripts and configs run inside Linux
+# containers and must keep LF even when cloned on Windows.
+* text=auto eol=lf
+*.png binary
